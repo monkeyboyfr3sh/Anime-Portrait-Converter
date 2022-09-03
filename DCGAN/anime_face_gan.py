@@ -12,104 +12,23 @@ import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
-
-# custom weights initialization called on netG and netD
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        torch.nn.init.normal_(m.weight, 0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        torch.nn.init.normal_(m.weight, 1.0, 0.02)
-        torch.nn.init.zeros_(m.bias)
-
-
-class Generator(nn.Module):
-    def __init__(self, ngpu,nz,nc,ngf):
-        super(Generator, self).__init__()
-        self.ngpu = ngpu
-        self.nz = nz
-        self.nc = nc
-        self.ngf = ngf
-        self.main = nn.Sequential(
-            # input is Z, going into a convolution
-            nn.ConvTranspose2d(     self.nz, self.ngf * 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(self.ngf * 8),
-            nn.ReLU(True),
-            
-            # state size. (ngf*8) x 4 x 4
-            nn.ConvTranspose2d(self.ngf * 8, self.ngf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(self.ngf * 4),
-            nn.ReLU(True),
-            
-            # state size. (ngf*4) x 8 x 8
-            nn.ConvTranspose2d(self.ngf * 4, self.ngf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(self.ngf * 2),
-            nn.ReLU(True),
-            
-            # state size. (ngf*2) x 16 x 16
-            nn.ConvTranspose2d(self.ngf * 2,     self.ngf, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(self.ngf),
-            nn.ReLU(True),
-
-            # state size. (ngf) x 32 x 32
-            nn.ConvTranspose2d( self.ngf, nc, 4, 2, 1, bias=False),
-            nn.Tanh()
-            # state size. (nc) x 64 x 64
-        )
-
-    def forward(self, input):
-        if input.is_cuda and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
-        else:
-            output = self.main(input)
-        return output
-
-class Discriminator(nn.Module):
-    def __init__(self, ngpu,nc,ndf):
-        super(Discriminator, self).__init__()
-        self.ngpu = ngpu
-        self.main = nn.Sequential(
-            # input is (nc) x 64 x 64
-            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf) x 32 x 32
-            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*2) x 16 x 16
-            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*4) x 8 x 8
-            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 8),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*8) x 4 x 4
-            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, input):
-        if input.is_cuda and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
-        else:
-            output = self.main(input)
-
-        return output.view(-1, 1).squeeze(1)
+from models import Generator
+from models import Discriminator
 
 def image_to_vector(img, nz):
     preprocess = transforms.Compose([
         transforms.Grayscale(),
         transforms.CenterCrop(int(math.sqrt(nz)))
     ])
-    altered_img = preprocess(img)
-    torch.flatten(altered_img)
-    torch.transpose()
-
+    vector = preprocess(img)
+    vector = torch.flatten(vector,start_dim=1,end_dim=3)
+    return vector[:,:,None,None]
 
 if __name__ == "__main__":
+    # Parse CMD line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--anime_dataroot', required=False, help='path to anime dataset')
+    parser.add_argument('--anime_dataroot', required=True, help='path to anime dataset')
+    parser.add_argument('--human_dataroot', required=True, help='path to human dataset')
     parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
     parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
     parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
@@ -130,71 +49,25 @@ if __name__ == "__main__":
 
     opt = parser.parse_args()
     print(opt)
-
+    
+    #################################################
+    # Parse the cmd inputs into vars
+    #################################################
+    if torch.cuda.is_available() and not opt.cuda:
+        print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+    cudnn.benchmark = True
+    device = torch.device("cuda:0" if opt.cuda else "cpu")
+    ngpu = int(opt.ngpu)
+    nz = int(opt.nz)
+    ngf = int(opt.ngf)
+    ndf = int(opt.ndf)
+    # make output dir if it doesn't exist
     if not (os.path.isdir(opt.outf)):
         try:
             os.makedirs(opt.outf)
         except:
             print('Could not make directory')
             exit(1)
-
-    if opt.manualSeed is None:
-        opt.manualSeed = random.randint(1, 10000)
-    print("Random Seed: ", opt.manualSeed)
-    random.seed(opt.manualSeed)
-    torch.manual_seed(opt.manualSeed)
-
-    cudnn.benchmark = True
-
-    if torch.cuda.is_available() and not opt.cuda:
-        print("WARNING: You have a CUDA device, so you should probably run with --cuda")
-
-    # folder dataset
-    anime_dataset = dset.ImageFolder(root=opt.anime_dataroot,
-                            transform=transforms.Compose([
-                                transforms.Resize(opt.imageSize),
-                                transforms.CenterCrop(opt.imageSize),
-                                transforms.ToTensor(),
-                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                            ]))
-    nc=3
-
-    assert anime_dataset
-    anime_dataloader = torch.utils.data.DataLoader(anime_dataset, batch_size=opt.batchSize,
-                                            shuffle=True, num_workers=int(opt.workers))
-
-    device = torch.device("cuda:0" if opt.cuda else "cpu")
-    ngpu = int(opt.ngpu)
-    nz = int(opt.nz)
-    ngf = int(opt.ngf)
-    ndf = int(opt.ndf)
-
-    netG = Generator(ngpu,nz,nc,ngf).to(device)
-    netG.apply(weights_init)
-    if opt.netG != '':
-        netG.load_state_dict(torch.load(opt.netG))
-    print(netG)
-
-    netD = Discriminator(ngpu,nc,ndf).to(device)
-    netD.apply(weights_init)
-    if opt.netD != '':
-        netD.load_state_dict(torch.load(opt.netD))
-    print(netD)
-
-    criterion = nn.BCELoss()
-
-    fixed_noise = torch.randn(opt.batchSize, nz, 1, 1, device=device)
-    real_label = 1
-    fake_label = 0
-
-    # setup optimizer
-    optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-    optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-
-    if opt.dry_run:
-        opt.niter = 1
-
-    # make output dir if it doesn't exist
     gen_path = os.path.join(opt.outf,'generator_chkpts')
     if not (os.path.isdir(gen_path)):
         try:
@@ -210,14 +83,89 @@ if __name__ == "__main__":
             print('Could not make directory')
             exit(1)
 
-    # gen_onnx_fname = os.path.join(gen_path,'generator.onnx')
-    # torch.onnx.export(netG,fixed_noise,gen_onnx_fname)
+    #################################################
+    # Load human dataset/dataloader
+    #################################################
+    human_dataset = dset.ImageFolder(root=opt.human_dataroot,
+                            transform=transforms.Compose([
+                                transforms.Resize(opt.imageSize),
+                                transforms.CenterCrop(opt.imageSize),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
 
-    # # disc_onnx_fname = os.path.join(disc_path,'discriminator.onnx')
-    # # inputs, classes = next(iter(anime_dataloader))  
-    # # torch.onnx.export(netD,inputs,disc_onnx_fname)
+    assert human_dataset
+    human_dataloader = torch.utils.data.DataLoader(human_dataset, batch_size=opt.batchSize,
+                                            shuffle=True, num_workers=int(opt.workers))
+    human_iterator = iter(human_dataloader)
+    fixed_human_sample = next(human_iterator)[0].to(device)
+    #################################################
+    # Load anime dataset/dataloader
+    #################################################
+    anime_dataset = dset.ImageFolder(root=opt.anime_dataroot,
+                            transform=transforms.Compose([
+                                transforms.Resize(opt.imageSize),
+                                transforms.CenterCrop(opt.imageSize),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+    assert anime_dataset
+    anime_dataloader = torch.utils.data.DataLoader(anime_dataset, batch_size=opt.batchSize,
+                                            shuffle=True, num_workers=int(opt.workers))
 
+    # One dataset will have different length from the other, so subset the longer one
+    human_len = len(human_dataset)
+    anime_len = len(anime_dataset)
+    # Human list is bigger
+    if(human_len>anime_len):
+        print('Human dataset is larger than anime dataset, truncating human dataset')
+        # TODO: Need to make this pull from random uinque indexs
+        list_index = list(range(0,anime_len))
+        human_dataset = torch.utils.data.Subset(human_dataset, list_index)
+        assert human_dataset
+        human_dataloader = torch.utils.data.DataLoader(human_dataset, batch_size=opt.batchSize,
+                                                shuffle=True, num_workers=int(opt.workers))
+        human_iterator = iter(human_dataloader)
+        fixed_human_sample = next(human_iterator)[0].to(device)
+    # Anime list is bigger
+    elif(human_len<anime_len):
+        print('Anime dataset is larger than human dataset, truncating anime dataset')
+        list_index = list(range(0,human_len))
+        anime_dataset = torch.utils.data.Subset(anime_dataset, list_index)
+        assert anime_dataset
+        anime_dataloader = torch.utils.data.DataLoader(anime_dataset, batch_size=opt.batchSize,
+                                                shuffle=True, num_workers=int(opt.workers))
+    nc=3
+    #################################################
+    # Make the models and load checkpoint if specified
+    #################################################
+    netG = Generator(ngpu,nz,nc,ngf).to(device)
+    if opt.netG != '':
+        netG.load_state_dict(torch.load(opt.netG))
+    print(netG)
+
+    netD = Discriminator(ngpu,nc,ndf).to(device)
+    if opt.netD != '':
+        netD.load_state_dict(torch.load(opt.netD))
+    print(netD)
+    # Criterion function
+    criterion = nn.BCELoss()
+    # setup optimizer
+    optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+    optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+
+    if opt.dry_run:
+        opt.niter = 1
+    real_label = 1
+    human_fake_label = 0
+
+    # Now do the training
     for epoch in range(opt.niter):
+        # Update iterator with more data
+        human_dataloader = torch.utils.data.DataLoader(human_dataset, batch_size=opt.batchSize,
+                                                shuffle=True, num_workers=int(opt.workers))
+        human_iterator = iter(human_dataloader)
+
         for i, data in enumerate(anime_dataloader, 0):
             ############################
             # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
@@ -234,23 +182,23 @@ if __name__ == "__main__":
             errD_real.backward()
             D_x = output.mean().item()
 
-            # train with fake
-            noise = torch.randn(batch_size, nz, 1, 1, device=device)
-            fake = netG(noise)
-            label.fill_(fake_label)
-            output = netD(fake.detach())
-            errD_fake = criterion(output, label)
-            errD_fake.backward()
+            # Get human sample
+            human_sample = next(human_iterator)[0].to(device)
+            human_fake = netG(image_to_vector(human_sample,nz))
+            label.fill_(human_fake_label)
+            output = netD(human_fake.detach())
+            errD_human_fake = criterion(output, label)
+            errD_human_fake.backward()
             D_G_z1 = output.mean().item()
-            errD = errD_real + errD_fake
+            errD = errD_real + errD_human_fake
             optimizerD.step()
 
             ############################
             # (2) Update G network: maximize log(D(G(z)))
             ###########################
             netG.zero_grad()
-            label.fill_(real_label)  # fake labels are real for generator cost
-            output = netD(fake)
+            label.fill_(real_label)  # human_fake labels are real for generator cost
+            output = netD(human_fake)
             errG = criterion(output, label)
             errG.backward()
             D_G_z2 = output.mean().item()
@@ -263,9 +211,9 @@ if __name__ == "__main__":
                 vutils.save_image(real_cpu,
                         '%s/real_samples.png' % opt.outf,
                         normalize=True)
-                fake = netG(fixed_noise)
-                vutils.save_image(fake.detach(),
-                        '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
+                human_fake = netG(image_to_vector(fixed_human_sample,nz))
+                vutils.save_image(human_fake.detach(),
+                        '%s/human_fake_samples_epoch_%03d.png' % (opt.outf, epoch),
                         normalize=True)
 
             if opt.dry_run:
@@ -276,7 +224,5 @@ if __name__ == "__main__":
         ###########################
         gen_fname = os.path.join(gen_path,'netG_epoch_%d.pth' % epoch)
         disc_fname = os.path.join(disc_path,'netD_epoch_%d.pth' % epoch)
-
-        # do checkpointing
         torch.save(netG.state_dict(), gen_fname)
         torch.save(netD.state_dict(), disc_fname)
